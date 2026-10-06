@@ -22,8 +22,8 @@
 # never force-pushes, never rewrites history, and aborts on any unexpected state.
 set -euo pipefail
 
-REPO=FreedomTechFeed/packages
-MOD=OpenTollGate/tollgate-module-basic-go
+REPO=${REPO_OVERRIDE:-FreedomTechFeed/packages}
+MOD=${MOD_OVERRIDE:-OpenTollGate/tollgate-module-basic-go}
 MK=net/tollgate-wrt/Makefile
 BRANCH_PREFIX=pr/tollgate-wrt
 ARG_TARGET=${1:-}
@@ -221,10 +221,11 @@ git config user.name  "$(git config --get user.name  || echo "$WHO")"
 git config user.email "$(git config --get user.email || echo "$WHO@users.noreply.github.com")"
 git checkout -q -b "$NEW_BRANCH"
 git add "$MK"
-git commit -q -m "build(pre${NEW_NN}): move the module pin to ${TARGET7} (${REFS# }), recompute PKG_HASH"
+git commit -q -m "build(pre${NEXT_NN}): move the module pin to ${TARGET7}, recompute PKG_HASH" \
+    -m "Module delta since ${CUR_SHA:0:7}: ${DELTA_N} commit(s). References: ${REFS# }"
 git push -q -u origin "$NEW_BRANCH"
 PR_URL=$(gh pr create --repo "$REPO" --base master --head "$NEW_BRANCH" \
-    --title "build(pre${NEW_NN}): move the module pin to ${TARGET7}, recompute PKG_HASH" \
+    --title "build(pre${NEXT_NN}): move the module pin to ${TARGET7}, recompute PKG_HASH" \
     --body "$(cat <<EOF
 Repins \`net/tollgate-wrt\` to the merged module main tip \`$TARGET\`.
 
@@ -253,12 +254,28 @@ EOF
 info "PR: $PR_URL"
 PR_NUM=$(printf '%s' "$PR_URL" | sed 's#.*/##')
 
-say "waiting for the PR checks (bound: 40 min)"
-if timeout 2400 gh pr checks "$PR_NUM" --repo "$REPO" --watch --interval 20 2>&1 | tail -25; then
-    info "all checks completed successfully"
+# Checks do NOT exist the instant the PR opens -- the run has to register first.
+# Poll for them, then watch; never merge a repin whose checks did not pass.
+say "waiting for the PR checks to register (bound: 5 min)"
+NCHK=0
+for _ in $(seq 1 30); do
+    NCHK=$(gh pr checks "$PR_NUM" --repo "$REPO" --json name --jq 'length' 2>/dev/null || echo 0)
+    case "$NCHK" in ''|*[!0-9]*) NCHK=0 ;; esac
+    [ "$NCHK" -gt 0 ] && break
+    sleep 10
+done
+info "checks registered: $NCHK"
+if [ "$NCHK" -eq 0 ]; then
+    info "no checks appeared for this PR within 5 minutes (runner outage, or the repo gates PRs by other means)"
+    [ "${FORCE_MERGE:-0}" = "1" ] || die "refusing to merge an unverified repin — the PR is open at $PR_URL (FORCE_MERGE=1 to merge anyway, HOLD=1 to stop here)"
 else
-    info "one or more checks did NOT pass — inspect $PR_URL"
-    [ "${FORCE_MERGE:-0}" = "1" ] || die "refusing to merge a repin whose checks did not pass (set FORCE_MERGE=1 to override, or use HOLD=1)"
+    say "waiting for the PR checks (bound: 40 min)"
+    if timeout 2400 gh pr checks "$PR_NUM" --repo "$REPO" --watch --interval 20 2>&1 | tail -25; then
+        info "all checks completed successfully"
+    else
+        info "one or more checks did NOT pass — inspect $PR_URL"
+        [ "${FORCE_MERGE:-0}" = "1" ] || die "refusing to merge a repin whose checks did not pass (FORCE_MERGE=1 to override, or HOLD=1 to stop at the PR)"
+    fi
 fi
 
 say "merging the repin PR"
