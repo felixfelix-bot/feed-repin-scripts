@@ -120,7 +120,7 @@ NEXT_NN=$((CUR_NN + 1))
 BASE_APK=$(printf '%s' "$VERSION_FILE" | sed 's/^v//; s/-/_/g')
 NEW_VER="${BASE_APK}_pre${NEXT_NN}"
 NEW_TAG="v${NEW_VER//_/-}"
-NEW_BRANCH="$BRANCH_PREFIX-${NEW_VER}_pre${NEXT_NN}"
+NEW_BRANCH="$BRANCH_PREFIX-${NEW_TAG#v}"
 
 if gh api "repos/$REPO/git/refs/tags/$NEW_TAG" >/dev/null 2>&1; then
     die "tag $NEW_TAG already exists in $REPO"
@@ -145,14 +145,16 @@ cat <<EOF
     PR branch          : $NEW_BRANCH  (in $REPO, base master)
     files changed      : $MK only
 EOF
-[ "$CUR_TAG" != "$VERSION_FILE" ] && info "NOTE: the repo-root VERSION file moved, so PKG_SOURCE_TAG moves with it (first time across a VERSION change)."
+if [ "$CUR_TAG" != "$VERSION_FILE" ]; then
+    info "NOTE: the repo-root VERSION file moved, so PKG_SOURCE_TAG moves with it (first time across a VERSION change)."
+fi
 
 # ------------------------------------------------------------------------ the edit
 say "editing $MK"
-python3 - "$MK" <<'PY' "$CUR_VER" "$NEW_VER" "$CUR_SHA" "$TARGET" "$CUR_HASH" "$NEW_HASH" "$CUR_TAG" "$VERSION_FILE" "$TARGET7" "$DELTA_N" "$WORK/delta.txt" "$REFS" "$NEW_TAG"
+python3 - "$MK" <<'PY' "$CUR_VER" "$NEW_VER" "$CUR_SHA" "$TARGET" "$CUR_HASH" "$NEW_HASH" "$CUR_TAG" "$VERSION_FILE" "$TARGET7" "$DELTA_N" "$WORK/delta.txt" "$REFS" "$NEW_TAG" "$NEXT_NN"
 import sys, pathlib
 (mk, cur_ver, new_ver, cur_sha, target, cur_hash, new_hash,
- cur_tag, ver_file, t7, dn, dpath, refs, tag) = sys.argv[1:]
+ cur_tag, ver_file, t7, dn, dpath, refs, tag, nn) = sys.argv[1:]
 p = pathlib.Path(mk)
 s = p.read_text()
 
@@ -175,7 +177,7 @@ delta = [l.strip() for l in pathlib.Path(dpath).read_text().splitlines() if l.st
 body = "\n".join(f"#   {d}" for d in delta)
 block = (
 f"""# ---------------------------------------------------------------------------
-# pre{tag.rsplit('pre', 1)[1]} moves the pin and does nothing else -- the same shape as every repin before it:
+# pre{nn} moves the pin and does nothing else -- the same shape as every repin before it:
 # the module moved, so PKG_SOURCE_VERSION and PKG_HASH move with it (PKG_HASH is
 # never recomputed without a pin move and never left stale across one), and no
 # other feed-side file changes.
@@ -230,7 +232,7 @@ Repins \`net/tollgate-wrt\` to the merged module main tip \`$TARGET\`.
 |---|---|---|
 | PKG_SOURCE_VERSION | \`$CUR_SHA\` | \`$TARGET\` |
 | PKG_HASH | \`$CUR_HASH\` | \`$NEW_HASH\` |
-| PKG_SOURCE_TAG | \`$CUR_TAG\` | \`$ver_file\` |
+| PKG_SOURCE_TAG | \`$CUR_TAG\` | \`$VERSION_FILE\` |
 | PKG_VERSION | \`$CUR_VER\` | \`$NEW_VER\` |
 
 \`$MK\` is the only file touched.
@@ -253,9 +255,10 @@ PR_NUM=$(printf '%s' "$PR_URL" | sed 's#.*/##')
 
 say "waiting for the PR checks (bound: 40 min)"
 if timeout 2400 gh pr checks "$PR_NUM" --repo "$REPO" --watch --interval 20 2>&1 | tail -25; then
-    info "checks finished"
+    info "all checks completed successfully"
 else
-    info "checks did not complete cleanly — inspect $PR_URL and re-run with HOLD=1 afterwards if needed"
+    info "one or more checks did NOT pass — inspect $PR_URL"
+    [ "${FORCE_MERGE:-0}" = "1" ] || die "refusing to merge a repin whose checks did not pass (set FORCE_MERGE=1 to override, or use HOLD=1)"
 fi
 
 say "merging the repin PR"
@@ -304,7 +307,7 @@ cat <<EOF
     tag          : $NEW_TAG
     module commit: $TARGET ($TARGET7)
     feed pin     : PKG_SOURCE_VERSION=$TARGET
-    pkg version  : $NEW_VER   (PKG_SOURCE_TAG=$ver_file)
+    pkg version  : $NEW_VER   (PKG_SOURCE_TAG=$VERSION_FILE)
     PKG_HASH     : $NEW_HASH
     repin PR     : $PR_URL (merged as $MERGE_SHA)
     assets       : $(sed -n '2p' "$WORK/rel.txt")
