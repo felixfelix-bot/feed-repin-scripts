@@ -254,28 +254,64 @@ EOF
 info "PR: $PR_URL"
 PR_NUM=$(printf '%s' "$PR_URL" | sed 's#.*/##')
 
-# Checks do NOT exist the instant the PR opens -- the run has to register first.
-# Poll for them, then watch; never merge a repin whose checks did not pass.
+# Checks do NOT exist the instant a PR opens -- the run has to register, and a
+# QUEUED run may not have produced a check-run yet. Poll the checks AND the
+# workflow runs on the branch; never merge a repin whose checks did not pass.
 say "waiting for the PR checks to register (bound: 5 min)"
-NCHK=0
+CHK_TOTAL=0; RUN_N=0
 for _ in $(seq 1 30); do
-    NCHK=$(gh pr checks "$PR_NUM" --repo "$REPO" --json name --jq 'length' 2>/dev/null || echo 0)
-    case "$NCHK" in ''|*[!0-9]*) NCHK=0 ;; esac
-    [ "$NCHK" -gt 0 ] && break
+    CHK_TOTAL=$(gh pr checks "$PR_NUM" --repo "$REPO" --json bucket --jq 'length' 2>/dev/null || echo 0)
+    case "$CHK_TOTAL" in ''|*[!0-9]*) CHK_TOTAL=0 ;; esac
+    RUN_N=$(gh run list --repo "$REPO" --branch "$NEW_BRANCH" --limit 20 --json databaseId --jq 'length' 2>/dev/null || echo 0)
+    case "$RUN_N" in ''|*[!0-9]*) RUN_N=0 ;; esac
+    { [ "$CHK_TOTAL" -gt 0 ] || [ "$RUN_N" -gt 0 ]; } && break
     sleep 10
 done
-info "checks registered: $NCHK"
-if [ "$NCHK" -eq 0 ]; then
-    info "no checks appeared for this PR within 5 minutes (runner outage, or the repo gates PRs by other means)"
+info "check-runs: $CHK_TOTAL   workflow runs on the branch: $RUN_N"
+
+if [ "$CHK_TOTAL" -eq 0 ] && [ "$RUN_N" -eq 0 ]; then
+    info "neither check-runs nor workflow runs appeared within 5 minutes"
     [ "${FORCE_MERGE:-0}" = "1" ] || die "refusing to merge an unverified repin — the PR is open at $PR_URL (FORCE_MERGE=1 to merge anyway, HOLD=1 to stop here)"
-else
-    say "waiting for the PR checks (bound: 40 min)"
-    if timeout 2400 gh pr checks "$PR_NUM" --repo "$REPO" --watch --interval 20 2>&1 | tail -25; then
-        info "all checks completed successfully"
+fi
+
+if [ "$CHK_TOTAL" -gt 0 ]; then
+    say "waiting for the PR checks to finish (bound: 40 min)"
+    DEADLINE=$(( $(date +%s) + 2400 ))
+    CHK_PENDING=0; CHK_FAIL=0
+    while :; do
+        S=$(gh pr checks "$PR_NUM" --repo "$REPO" --json bucket \
+            --jq '"\\(length) \\([.[]|select(.bucket=="pending")]|length) \\([.[]|select(.bucket=="fail" or .bucket=="cancel")]|length)"' 2>/dev/null || echo "0 0 0")
+        read -r CHK_TOTAL CHK_PENDING CHK_FAIL <<<"$S" || true
+        case "$CHK_TOTAL$CHK_PENDING$CHK_FAIL" in *[!0-9]*|'') CHK_TOTAL=0; CHK_PENDING=0; CHK_FAIL=0 ;; esac
+        [ "$CHK_TOTAL" -gt 0 ] && [ "$CHK_PENDING" -eq 0 ] && break
+        if [ "$(date +%s)" -ge "$DEADLINE" ]; then CHK_FAIL=1; info "check watch timed out"; break; fi
+        sleep 20
+    done
+    if [ "$CHK_FAIL" -gt 0 ] || [ "$CHK_TOTAL" -eq 0 ]; then
+        info "checks did not all pass ($CHK_FAIL failing) — inspect $PR_URL"
+        [ "${FORCE_MERGE:-0}" = "1" ] || die "refusing to merge a repin whose checks did not pass (FORCE_MERGE=1 to override, HOLD=1 to stop at the PR)"
     else
-        info "one or more checks did NOT pass — inspect $PR_URL"
-        [ "${FORCE_MERGE:-0}" = "1" ] || die "refusing to merge a repin whose checks did not pass (FORCE_MERGE=1 to override, or HOLD=1 to stop at the PR)"
+        info "all $CHK_TOTAL check(s) passed"
     fi
+else
+    say "no check-runs reported — watching the $RUN_N workflow run(s) on the branch (bound: 40 min)"
+    DEADLINE=$(( $(date +%s) + 2400 ))
+    while :; do
+        PENDING=$(gh run list --repo "$REPO" --branch "$NEW_BRANCH" --limit 20 \
+            --json status --jq '[.[]|select(.status!="completed")]|length' 2>/dev/null || echo 1)
+        case "$PENDING" in ''|*[!0-9]*) PENDING=1 ;; esac
+        if [ "$PENDING" -eq 0 ]; then
+            BAD=$(gh run list --repo "$REPO" --branch "$NEW_BRANCH" --limit 20 \
+                --json conclusion --jq '[.[]|select(.conclusion!="success" and .conclusion!="skipped" and .conclusion!="neutral")]|length' 2>/dev/null || echo 1)
+            case "$BAD" in ''|*[!0-9]*) BAD=1 ;; esac
+            if [ "$BAD" -eq 0 ]; then info "every run on the branch succeeded"; break; fi
+            info "runs did not all succeed ($BAD) — inspect $PR_URL"
+            [ "${FORCE_MERGE:-0}" = "1" ] || die "refusing to merge a repin whose runs did not succeed (FORCE_MERGE=1 to override, HOLD=1 to stop at the PR)"
+            break
+        fi
+        [ "$(date +%s)" -lt "$DEADLINE" ] || die "run watch timed out — the PR is open at $PR_URL"
+        sleep 20
+    done
 fi
 
 say "merging the repin PR"
