@@ -48,11 +48,15 @@ if [ "$UNFIN" != 0 ]; then
 fi
 
 say "2. verify the pin MYSELF (do not trust a wedged CI)"
-MKGREP=$(gh api "repos/$REPO/contents/net/tollgate-wrt/Makefile?ref=$BR" --jq .content | base64 -d) || die "cannot read the branch Makefile"
-SHA=$(printf '%s\n' "$MKGREP" | grep -m1 '^PKG_SOURCE_VERSION:=' | cut -d= -f2-)
-HASH=$(printf '%s\n' "$MKGREP" | grep -m1 '^PKG_HASH:=' | cut -d= -f2-)
-VTAG=$(printf '%s\n' "$MKGREP" | grep -m1 '^PKG_SOURCE_TAG:=' | cut -d= -f2-)
-PV=$(printf '%s\n' "$MKGREP" | grep -m1 '^PKG_VERSION:=' | cut -d= -f2-)
+gh api "repos/$REPO/contents/net/tollgate-wrt/Makefile?ref=$BR" --jq .content | base64 -d > "$WORK/Makefile.branch" \
+  || die "cannot read the branch Makefile at $BR"
+[ -s "$WORK/Makefile.branch" ] || die "the branch Makefile came back empty"
+# NOTE (measured: exit 141 = SIGPIPE): NEVER pipe a producer into an
+# early-exiting reader (grep -m1, head -1) under `set -o pipefail` — the reader
+# closes the pipe, the producer dies of SIGPIPE, the pipeline returns 141 and
+# `set -e` exits the script SILENTLY. awk reads to EOF and prints once instead.
+mval() { awk -F':=' -v k="$1" '$1==k && !seen { print $2; seen=1 }' "$WORK/Makefile.branch"; }
+SHA=$(mval PKG_SOURCE_VERSION); HASH=$(mval PKG_HASH); VTAG=$(mval PKG_SOURCE_TAG); PV=$(mval PKG_VERSION)
 for pair in "PKG_SOURCE_VERSION:$SHA" "PKG_HASH:$HASH" "PKG_SOURCE_TAG:$VTAG" "PKG_VERSION:$PV"; do
   [ -n "${pair#*:}" ] || die "${pair%%:*} is empty in the branch Makefile"
 done
@@ -119,10 +123,14 @@ gh release view "$TAG" --repo "$REPO" --json assets --jq '"  assets: \(.assets|l
 gh release download "$TAG" --repo "$REPO" --pattern "*${ARCH}*.apk" --dir "$WORK" --clobber 2>/dev/null \
   || gh release download "$TAG" --repo "$REPO" --pattern "*${ARCH}*.ipk" --dir "$WORK" --clobber \
   || die "no $ARCH artifact on the release"
-ART=$(ls "$WORK" | grep -E "${ARCH}.*\.(apk|ipk)$" | head -1)
+# find -print -quit instead of `find ... | head -1` (SIGPIPE under pipefail).
+ART=$(find "$WORK" -maxdepth 1 -type f -name "*${ARCH}*.apk" -print -quit)
+[ -n "$ART" ] || ART=$(find "$WORK" -maxdepth 1 -type f -name "*${ARCH}*.ipk" -print -quit)
+[ -n "$ART" ] || die "downloaded artifact not found in $WORK"
+ART=$(basename "$ART")
 mkdir -p "$WORK/x"; tar xzf "$WORK/$ART" -C "$WORK/x" 2>/dev/null || true
 for i in "$WORK"/x/data.tar.gz "$WORK"/x/*.tar.gz; do [ -f "$i" ] && tar xzf "$i" -C "$WORK/x" 2>/dev/null || true; done
-PUB=$(find "$WORK/x" -name '92-tollgate-admin-setup' | head -1)
+PUB=$(find "$WORK/x" -name '92-tollgate-admin-setup' -print -quit)
 [ -n "$PUB" ] || die "the published artifact does not contain 92-tollgate-admin-setup"
 grep -q 'entry-ui-mapping' "$PUB" || die "the PUBLISHED 92 is NOT mode-aware — the flip is not in the shipped bytes"
 echo "  OK $ART ships the mode-aware 92 (D4 marker present)"

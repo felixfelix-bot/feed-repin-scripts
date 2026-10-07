@@ -68,8 +68,12 @@ else
 fi
 
 say "3. prove the flip is in the feed tree (not just claimed)"
-LOCK=$(gh api "repos/$REPO/contents/net/tollgate-wrt/vendor.lock.json" --jq .content | base64 -d)
-echo "$LOCK" | grep -q "$PORTAL_SHA" \
+# Never `echo "$VAR" | grep -q` under pipefail: grep -q exits at the first match,
+# the writer takes SIGPIPE, the pipeline returns 141 and set -e exits silently.
+gh api "repos/$REPO/contents/net/tollgate-wrt/vendor.lock.json" --jq .content | base64 -d > "$WORK/lock.json" \
+  || die "cannot read vendor.lock.json"
+[ -s "$WORK/lock.json" ] || die "vendor.lock.json came back empty"
+grep -q "$PORTAL_SHA" "$WORK/lock.json" \
   || die "vendor.lock.json does not pin portal_commit=$PORTAL_SHA — the vendored portal is NOT the entry_ui revision"
 echo "  OK vendor.lock.json -> portal_commit $PORTAL_SHA"
 gh api "repos/$REPO/contents/net/tollgate-wrt/files/uci-defaults/92-tollgate-admin-setup" --jq .content \
