@@ -4,10 +4,16 @@
 #
 # Run as the feed maintainer (gh must be authenticated with push rights):
 #
-#   bash <(curl -fsSL https://raw.githubusercontent.com/felixfelix-bot/packages/tooling/feed-repin/scripts/feed-repin.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/felixfelix-bot/feed-repin-scripts/main/scripts/feed-repin.sh)
 #   bash <(curl -fsSL <same-url>) <commit>   # repin to a specific module commit (short or full sha)
 #   DRY=1  bash <(curl -fsSL <same-url>)     # print the plan + diff, change nothing
 #   HOLD=1 bash <(curl -fsSL <same-url>)     # stop after the PR is merged (no tag / no publish)
+#
+# NOTE (2026-10-07): the URL above is the live one. The older
+# raw.githubusercontent.com/felixfelix-bot/packages/tooling/feed-repin/... path is a
+# 404 — and `bash <(curl ...)` returns 0 on a 404, so it fails SILENTLY. Prefer:
+#   curl -fsSL -o /tmp/feed-repin.sh <url> && bash /tmp/feed-repin.sh
+# which aborts on a 404 instead of running an empty script.
 #
 # It touches exactly ONE feed file — net/tollgate-wrt/Makefile:
 #   PKG_SOURCE_VERSION := the target commit SHA (the real pin)
