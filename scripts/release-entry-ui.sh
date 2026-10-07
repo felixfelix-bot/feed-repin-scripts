@@ -41,12 +41,16 @@ STATE=$(gh pr view "$REVENDOR_PR" --repo "$REPO" --json state --jq .state)
 if [ "$STATE" = OPEN ]; then
   DEADLINE=$(( $(date +%s) + 3600 ))
   while :; do
+    # NOTE: `gh pr checks --json` does not exist on older gh (it fails with
+    # "unknown flag: --json" and then reads as ZERO checks — a silent gate
+    # bypass). Use `gh pr view --json statusCheckRollup`, which works on both.
     read -r TOTAL PEND FAIL <<EOF
-$(gh pr checks "$REVENDOR_PR" --repo "$REPO" --json bucket \
-   --jq '"\(length) \([.[]|select(.bucket=="pending")]|length) \([.[]|select(.bucket=="fail" or .bucket=="cancel")]|length)"')
+$(gh pr view "$REVENDOR_PR" --repo "$REPO" --json statusCheckRollup \
+   --jq '[.statusCheckRollup[]?] | "\(length) \([.[]|select(.status!="COMPLETED")]|length) \([.[]|select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT")]|length)"')
 EOF
-    echo "  checks: ${TOTAL:-0} total, ${PEND:-0} pending, ${FAIL:-0} failing"
+    echo "  checks: ${TOTAL:-0} total, ${PEND:-0} unfinished, ${FAIL:-0} failing"
     [ "${FAIL:-0}" -gt 0 ] && die "a check is FAILING on PR #$REVENDOR_PR. Inspect: gh pr checks $REVENDOR_PR --repo $REPO"
+    [ "${TOTAL:-0}" -gt 0 ] || die "no checks reported for PR #$REVENDOR_PR (gate cannot be verified) — refusing to merge"
     [ "${PEND:-0}" -eq 0 ] && break
     [ "$(date +%s)" -lt "$DEADLINE" ] || die "checks did not finish within 60 min — re-run this command, it resumes safely"
     sleep 45
